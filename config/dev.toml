@@ -1,0 +1,16 @@
+# Development configuration for an ordinary Linux machine.
+#
+# Start an mpv to watch, e.g. in a window:
+#   mpv --idle=yes --force-window=yes --input-ipc-server=dev-data/mpv.sock
+# or point mpv-socket at the one remoteplayer-restservice's dev config uses
+# (../remoteplayer-restservice/dev-data/run/mpv.sock).
+# Then, from the repository root:
+#   cargo run -- --config config/dev.toml
+
+mpv-socket = "dev-data/mpv.sock"
+interval-seconds = 7
+request-timeout-seconds = 2
+
+[output]
+file = "dev-data/state.json"
+socket = "dev-data/state.sock"

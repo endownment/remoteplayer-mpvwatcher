@@ -1,0 +1,19 @@
+# remoteplayer-mpvwatcher configuration for the Raspberry Pi.
+# Installed as /etc/remoteplayer/mpvwatcher.toml (see README.md, "Installation").
+
+# The IPC socket of remoteplayer-mpv.service.
+mpv-socket = "/run/remoteplayer-mpv/mpv.sock"
+
+# How often the playback state is recorded.
+interval-seconds = 7
+
+# How long to wait for each reply from mpv before reconnecting.
+request-timeout-seconds = 2
+
+[output]
+# Latest snapshot as JSON, replaced atomically; written only when it changes.
+# remoteplayer-restservice reads it (restore.watcher-state-file) to resume after a crash.
+file = "/var/lib/remoteplayer-mpvwatcher/state.json"
+
+# The watcher's own IPC: newline-delimited JSON for anyone who wants live updates.
+socket = "/run/remoteplayer-mpvwatcher/state.sock"

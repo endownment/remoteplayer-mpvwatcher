@@ -1,0 +1,24 @@
+[package]
+name = "remoteplayer-mpvwatcher"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Periodically records the mpv playback state so it can be restored after a restart"
+publish = false
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+sd-notify = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt", "net", "io-util", "time", "signal", "sync"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+strip = true
