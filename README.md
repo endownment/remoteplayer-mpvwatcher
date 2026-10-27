@@ -94,14 +94,14 @@ README).
 ### From the APT repository (recommended)
 
 The packages of every release are published in a signed APT repository,
-[endownment/endownment-remoteplayer-apt](https://github.com/endownment/endownment-remoteplayer-apt),
+[endownment/remoteplayer-apt](https://github.com/endownment/remoteplayer-apt),
 so updates come with `apt upgrade`:
 
 ```sh
 sudo curl -fsSLo /usr/share/keyrings/remoteplayer-archive-keyring.gpg \
-    https://endownment.github.io/endownment-remoteplayer-apt/remoteplayer-archive-keyring.gpg
+    https://endownment.github.io/remoteplayer-apt/remoteplayer-archive-keyring.gpg
 sudo curl -fsSLo /etc/apt/sources.list.d/remoteplayer.sources \
-    https://endownment.github.io/endownment-remoteplayer-apt/remoteplayer.sources
+    https://endownment.github.io/remoteplayer-apt/remoteplayer.sources
 sudo apt update
 sudo apt install remoteplayer-mpvwatcher
 sudo systemctl enable --now remoteplayer-mpvwatcher.service

@@ -138,7 +138,7 @@ package for the Pi's own architecture (with the memory precautions above).
    needs a newer glibc than 2.36 (the `libc6 (>= 2.36)` dependency);
 3. **release** — only for a tag `vX.Y.Z` that matches `version` in
    `Cargo.toml`: publishes the three packages as a GitHub release and
-   notifies [endownment-remoteplayer-apt](https://github.com/endownment/endownment-remoteplayer-apt),
+   notifies [remoteplayer-apt](https://github.com/endownment/remoteplayer-apt),
    which adds them to the APT repository (secret `APT_REPOSITORY_TOKEN`;
    without it within a day).
 
