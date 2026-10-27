@@ -102,9 +102,9 @@ sudo systemctl enable --now remoteplayer-mpvwatcher.service
 ```
 
 It installs `/usr/bin/remoteplayer-mpvwatcher`, `/etc/remoteplayer/mpvwatcher.toml`
-(kept on upgrades), `remoteplayer-mpvwatcher.service`, the system user
-`remoteplayer` (shared with remoteplayer-restservice: mpv's socket is private
-to it) and `/srv/remoteplayer/state/mpvwatcher`. Nothing is enabled on
+(kept on upgrades), `remoteplayer-mpvwatcher.service`, the system user and
+group `remoteplayer` (shared with remoteplayer-restservice: mpv's socket is
+open to the group only) and `/srv/remoteplayer/state/mpvwatcher`. Nothing is enabled on
 installation. An upgrade restarts the watcher if it runs — it saves its
 snapshot when stopping and loads it when starting.
 
@@ -117,17 +117,24 @@ sudo adduser --system --group --home /var/lib/remoteplayer remoteplayer   # if n
 sudo install -m 0755 target/release/remoteplayer-mpvwatcher /usr/bin/
 sudo install -d /etc/remoteplayer
 sudo install -m 0644 config/mpvwatcher.toml /etc/remoteplayer/mpvwatcher.toml
-sudo install -d -o remoteplayer -g remoteplayer -m 0750 /srv/remoteplayer/state/mpvwatcher   # skip on a fully read-only system
+sudo install -d -o remoteplayer -g remoteplayer -m 2770 /srv/remoteplayer/state/mpvwatcher   # skip on a fully read-only system
 sudo install -m 0644 deploy/systemd/remoteplayer-mpvwatcher.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now remoteplayer-mpvwatcher.service
 ```
 
-The unit runs as `remoteplayer`, keeps the socket in
-`/run/remoteplayer-mpvwatcher/`, may write only
+The unit runs as `remoteplayer` with the group `remoteplayer`, keeps the
+socket in `/run/remoteplayer-mpvwatcher/` (open to the group), may write only
 `/srv/remoteplayer/state/mpvwatcher/`, uses systemd's watchdog, and is
 sandboxed (read-only system, no devices, Unix sockets only). It has no
-`StateDirectory=`, which systemd could not create on a read-only root.
+`StateDirectory=`, which systemd could not create on a read-only root, and
+restarts without a limit (`StartLimitIntervalSec=0`).
+
+Other programs may ask the watcher too: they need to be in the group
+`remoteplayer`. To run the watcher as another user, change only `User=` in a
+drop-in. Both are described for all remoteplayer units in the
+remoteplayer-restservice README, "Other programs using mpv" and "Running as
+another user".
 
 ### Checking and logs
 

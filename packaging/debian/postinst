@@ -3,7 +3,8 @@
 set -e
 
 if [ "$1" = "configure" ]; then
-    # Shared with remoteplayer-restservice: mpv's IPC socket is private to this user.
+    # Shared with remoteplayer-restservice: mpv's IPC socket and the watcher's
+    # socket are open to this user's group only.
     if ! getent passwd remoteplayer >/dev/null; then
         adduser --system --group --home /var/lib/remoteplayer --no-create-home \
             --gecos "remoteplayer services" remoteplayer
@@ -12,9 +13,10 @@ if [ "$1" = "configure" ]; then
 
     # The state file's directory on the writable part of the system (README of
     # remoteplayer-restservice, "Read-only SD card"). If a partition is mounted
-    # at /srv/remoteplayer later, create it on that partition as well.
+    # at /srv/remoteplayer later, create it on that partition as well. 2770:
+    # writable for the group, and the setgid bit keeps new files in it.
     install -d -m 0755 /srv/remoteplayer /srv/remoteplayer/state 2>/dev/null || true
-    install -d -o remoteplayer -g remoteplayer -m 0750 /srv/remoteplayer/state/mpvwatcher 2>/dev/null || true
+    install -d -o remoteplayer -g remoteplayer -m 2770 /srv/remoteplayer/state/mpvwatcher 2>/dev/null || true
 
     if [ -d /run/systemd/system ]; then
         systemctl daemon-reload
