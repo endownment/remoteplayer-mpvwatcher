@@ -3,9 +3,9 @@
 Keys are kebab-case. Readers must ignore unknown keys; any incompatible
 change increments `format-version`.
 
-- The **state file** holds the object below, pretty-printed.
-- The **state socket** answers `get` with the same object on one line, minus
-  `sequence` (see "Socket protocol").
+The **snapshot** — the object below — is what `last` returns inside `state`
+and what the state file holds (pretty-printed). `get` returns the same
+`mpv` and `player` parts for the live state (see "Socket protocol").
 
 ```json
 {
@@ -39,8 +39,8 @@ change increments `format-version`.
 | Key | Type | mpv property | Notes |
 |---|---|---|---|
 | `format-version` | integer | — | `1` |
-| `captured-at-unix-ms` | integer | — | file: when this state was first observed; socket: when mpv was queried |
-| `sequence` | integer | — | file only: +1 for every written change; survives watcher restarts |
+| `captured-at-unix-ms` | integer | — | when this state was first observed |
+| `sequence` | integer | — | +1 for every recorded change; continues across restarts when the state file is writable |
 | `mpv.pid` | integer or null | `pid` | the process the state belongs to |
 | `mpv.version` | string or null | `mpv-version` | |
 | `player.playlist[].filename` | string | `playlist` | absolute path or URL, as mpv reports it |
@@ -63,30 +63,63 @@ Request/response over a Unix stream socket, one line (terminated by `\n`)
 each way. The watcher never sends anything unasked. A client may keep the
 connection open and send any number of requests.
 
-| Request | Reply |
-|---|---|
-| `get` | mpv's state at this moment: the object above without `sequence` |
-| empty line | nothing |
-| anything else | `{"error": "unknown request `...`; supported: get"}` |
+### `get` — the live state, read from mpv now
 
-When mpv cannot be reached, `get` is answered with
-`{"error": "cannot connect to /run/remoteplayer-mpv/mpv.sock: ..."}`. A reply
-is a state exactly when it has no `error` key.
+```json
+{"format-version":1,"captured-at-unix-ms":1792976499186,"mpv-reachable":true,"mpv":{...},"player":{...}}
+{"format-version":1,"captured-at-unix-ms":1792976499186,"mpv-reachable":false,"detail":"cannot connect to /run/remoteplayer-mpv/mpv.sock: ..."}
+```
 
-`get` reports mpv as it is, so right after a crash it shows the new, empty
-mpv. The snapshot needed for a restore is the one in the state file.
+`get` shows mpv as it is: right after a crash that is the new, empty mpv.
 
-## Semantics of the state file
+### `last` — the snapshot to restore from
 
-- A new state is written only when the player part or the mpv pid changed.
-  `captured-at-unix-ms` is therefore the moment the state was **first seen**,
-  not the time of the last poll.
+```json
+{"format-version":1,"known":true,"state":{ ...the snapshot above... }}
+{"format-version":1,"known":false}
+```
+
+`known` is false when the watcher has not seen mpv since it started and
+had no usable state file — "the player was not running, its state is
+unknown".
+
+### `status` — diagnostics
+
+```json
+{
+  "format-version": 1,
+  "mpv-connected": true,
+  "mpv-error": null,
+  "last-known": true,
+  "last-sequence": 42,
+  "state-file": {
+    "mode": "read-write", "path": "/srv/remoteplayer/state/mpvwatcher/state.json", "volatile": false,
+    "last-written-sequence": 42, "last-write-error": null
+  }
+}
+```
+
+`state-file.mode` is `read-write` (with `volatile`: on tmpfs/overlay, lost on
+power-off), `read-only` (with `reason`: why it cannot be written; the file is
+not used) or `not-configured`.
+
+### Anything else
+
+`{"error": "unknown request `...`; supported: get, last, status"}`; empty lines
+are ignored.
+
+## Semantics of the snapshot
+
+- It changes only when the player part or the mpv pid changes;
+  `captured-at-unix-ms` is the moment the state was **first seen**.
 - If mpv's pid changed and the new mpv has an empty playlist, the previous
-  state stays in the file (see README, "The state file keeps what is needed
-  to resume").
+  snapshot is kept (see README, "The snapshot survives what it is meant to
+  survive").
+- An empty `playlist` from the same pid means playback was stopped on purpose.
 - mpv deselects the audio track itself when it cannot open the audio output.
   That is not a user choice, so in that situation `"auto"` is recorded.
-- An empty `playlist` from the same pid means playback was stopped on purpose.
+- The position is followed at most once per second; in the state file it may
+  be up to `position-save-seconds` old.
 
 ## Restoring from it
 

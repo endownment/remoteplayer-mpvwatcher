@@ -28,7 +28,6 @@ impl Recorder {
         Recorder { latest: previous, sequence }
     }
 
-    #[cfg(test)]
     pub fn latest(&self) -> Option<&SavedPlayerState> {
         self.latest.as_ref()
     }

@@ -3,7 +3,9 @@ mod mpv_connection;
 mod output;
 mod recorder;
 mod sampler;
+mod shared;
 mod snapshot;
+mod tracker;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -12,19 +14,25 @@ use std::time::Duration;
 
 use clap::Parser;
 use tokio::signal::unix::{Signal, SignalKind, signal};
+use tokio::sync::watch;
+use tokio::task::JoinHandle;
 use tokio::time::{Interval, MissedTickBehavior};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::filter::FromEnvError;
 
 use crate::config::WatcherConfig;
-use crate::mpv_connection::MpvError;
-use crate::output::{SocketServer, read_state_file, write_state_file};
-use crate::recorder::{Decision, Recorder};
-use crate::sampler::{Sampler, TimedCapture};
+use crate::output::{SocketServer, StateFileMode, probe_state_file, read_state_file};
+use crate::recorder::Recorder;
+use crate::sampler::Sampler;
+use crate::shared::SharedState;
 use crate::snapshot::SavedPlayerState;
+use crate::tracker::{Tracker, TrackerConfig};
+
+/// How long the tracker may take to write its final snapshot on shutdown.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Parser)]
-#[command(version, about = "Records the mpv playback state and serves it on request")]
+#[command(version, about = "Follows the mpv playback state and serves it on request")]
 struct CommandLine {
     /// Path to the TOML configuration file.
     #[arg(long, default_value = "/etc/remoteplayer/mpvwatcher.toml")]
@@ -48,92 +56,82 @@ async fn main() -> ExitCode {
 
 async fn run(command_line: CommandLine) -> Result<(), Box<dyn std::error::Error>> {
     let config: WatcherConfig = WatcherConfig::load(&command_line.config)?;
-    let sampler: Arc<Sampler> =
-        Arc::new(Sampler::new(config.mpv_socket.clone(), Duration::from_secs(config.request_timeout_seconds)));
+    let request_timeout: Duration = Duration::from_secs(config.request_timeout_seconds);
+
+    let state_file_mode: StateFileMode = probe_state_file(config.state_file.as_deref());
+    let (writable_file, previous): (Option<PathBuf>, Option<SavedPlayerState>) = match &state_file_mode {
+        StateFileMode::ReadWrite { path, volatile } => {
+            if *volatile {
+                tracing::warn!(file = %path.display(), "the state file is on a RAM-backed filesystem; it will not survive a power-off");
+            }
+            tracing::info!(file = %path.display(), "state file is writable");
+            (Some(path.clone()), read_state_file(path))
+        }
+        // An old file in a place we cannot write to may be arbitrarily stale (for
+        // example baked into a read-only image), so it is not used at all.
+        StateFileMode::ReadOnly { path, reason } => {
+            tracing::warn!(file = %path.display(), reason, "state file is not writable; the snapshot stays in memory only");
+            (None, None)
+        }
+        StateFileMode::NotConfigured => {
+            tracing::info!("no state file configured; the snapshot stays in memory only");
+            (None, None)
+        }
+    };
+
+    let shared: Arc<SharedState> = Arc::new(SharedState::new(state_file_mode, previous.clone()));
+    let sampler: Arc<Sampler> = Arc::new(Sampler::new(config.mpv_socket.clone(), request_timeout));
 
     // Ownership: `_socket_server` lives until the end of `run`; its Drop then
     // removes the socket file. Named with a leading underscore because it is
     // never used directly — a bare `_` would drop it immediately.
     let _socket_server: Option<SocketServer> = match &config.state_socket {
         Some(path) => {
-            tracing::info!(socket = %path.display(), "answering `get` requests");
-            Some(SocketServer::start(path, Arc::clone(&sampler))?)
+            tracing::info!(socket = %path.display(), "answering get, last and status requests");
+            Some(SocketServer::start(path, Arc::clone(&sampler), Arc::clone(&shared))?)
         }
         None => None,
     };
 
-    let interval: Duration = Duration::from_secs(config.state_file_interval_seconds);
-    let mut file_recorder: Option<FileRecorder> = config.state_file.clone().map(|path: PathBuf| {
-        tracing::info!(file = %path.display(), interval_seconds = interval.as_secs(), "recording the state file");
-        FileRecorder { recorder: Recorder::new(read_state_file(&path)), path, interval, sampler: Arc::clone(&sampler) }
-    });
-    let mut file_timer: Option<Interval> = file_recorder.as_ref().map(|_recorder: &FileRecorder| repeating(interval));
-    let mut watchdog_timer: Option<Interval> = systemd_watchdog_interval().map(repeating);
+    let tracker: Tracker = Tracker::new(
+        TrackerConfig {
+            mpv_socket: config.mpv_socket.clone(),
+            request_timeout,
+            state_file: writable_file,
+            position_save_interval: (config.position_save_seconds > 0)
+                .then(|| Duration::from_secs(config.position_save_seconds)),
+        },
+        Recorder::new(previous),
+        Arc::clone(&shared),
+    );
+    let (stop_tracker, tracker_stopped): (watch::Sender<bool>, watch::Receiver<bool>) = watch::channel(false);
+    let tracker_task: JoinHandle<()> = tokio::spawn(tracker.run(tracker_stopped));
 
+    let mut watchdog_timer: Option<Interval> = systemd_watchdog_interval().map(repeating);
     let mut terminate: Signal = signal(SignalKind::terminate())?;
     notify_systemd(sd_notify::NotifyState::Ready);
     loop {
         tokio::select! {
-            () = next_tick(&mut file_timer) => {
-                if let Some(recorder) = file_recorder.as_mut() {
-                    recorder.update().await;
-                }
-            }
             () = next_tick(&mut watchdog_timer) => notify_systemd(sd_notify::NotifyState::Watchdog),
             _ = tokio::signal::ctrl_c() => break,
             _ = terminate.recv() => break,
         }
     }
+
+    // The tracker writes the final snapshot (if the file is usable) before it ends.
+    stop_tracker.send_replace(true);
+    let finished: Result<Result<(), tokio::task::JoinError>, tokio::time::error::Elapsed> =
+        tokio::time::timeout(SHUTDOWN_GRACE, tracker_task).await;
+    if finished.is_err() {
+        tracing::warn!("the tracker did not finish in time; the last snapshot may not be saved");
+    }
     tracing::info!("stopped");
     Ok(())
 }
 
-/// Keeps the state file current, applying the rule that a restarted, still
-/// empty mpv must not overwrite the snapshot needed to restore playback.
-struct FileRecorder {
-    path: PathBuf,
-    interval: Duration,
-    recorder: Recorder,
-    sampler: Arc<Sampler>,
-}
-
-impl FileRecorder {
-    async fn update(&mut self) {
-        // A capture made for a socket client within the last interval is as good
-        // as a new one, so mpv is not asked twice.
-        let captured: Result<TimedCapture, MpvError> = self.sampler.capture_reusing(self.interval).await;
-        let Ok(timed): Result<TimedCapture, MpvError> = captured else {
-            // The sampler has already logged that mpv is unreachable; the file keeps the last snapshot.
-            return;
-        };
-        match self.recorder.consider(timed.capture, timed.captured_at_unix_ms) {
-            Decision::Publish(state) => self.write(state).await,
-            Decision::HoldPrevious => {
-                tracing::debug!("mpv restarted and is still empty; keeping the previous snapshot");
-            }
-            Decision::Unchanged => {}
-        }
-    }
-
-    async fn write(&self, state: SavedPlayerState) {
-        tracing::debug!(sequence = state.sequence, "writing the state file");
-        let path: PathBuf = self.path.clone();
-        // fsync can take a while on an SD card; it must not stall the single
-        // thread that also answers socket clients.
-        let written: Result<std::io::Result<()>, tokio::task::JoinError> =
-            tokio::task::spawn_blocking(move || write_state_file(&path, &state)).await;
-        match written {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => tracing::warn!(%error, "cannot write the state file"),
-            Err(error) => tracing::warn!(%error, "state file writer failed"),
-        }
-    }
-}
-
 fn repeating(period: Duration) -> Interval {
     let mut timer: Interval = tokio::time::interval(period);
-    // After a stall (e.g. the Pi was busy), continue at the normal pace instead
-    // of firing the missed ticks in a burst.
+    // After a stall, continue at the normal pace instead of a burst of ticks.
     timer.set_missed_tick_behavior(MissedTickBehavior::Delay);
     timer
 }

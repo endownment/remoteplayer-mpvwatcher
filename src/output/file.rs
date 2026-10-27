@@ -2,7 +2,64 @@ use std::ffi::OsString;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use nix::sys::statfs::{FsType, OVERLAYFS_SUPER_MAGIC, Statfs, TMPFS_MAGIC};
+use serde::Serialize;
+
 use crate::snapshot::{FORMAT_VERSION, SavedPlayerState};
+
+/// Whether the state file can be used, decided once at start-up.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "mode", rename_all = "kebab-case")]
+pub enum StateFileMode {
+    /// `state-file` is commented out.
+    NotConfigured,
+    /// Configured, but the directory cannot be written (read-only mount, no
+    /// permission, missing partition). A file found there is not trusted.
+    ReadOnly { path: PathBuf, reason: String },
+    /// `volatile`: the directory is on tmpfs or an overlay (e.g. the Raspberry
+    /// Pi OS overlay file system), so the file is lost on power-off.
+    ReadWrite { path: PathBuf, volatile: bool },
+}
+
+/// Tries to create and delete a file next to the state file: the only reliable
+/// test, because permissions, read-only mounts and ACLs all play a part.
+pub fn probe_state_file(path: Option<&Path>) -> StateFileMode {
+    let Some(path): Option<&Path> = path else {
+        return StateFileMode::NotConfigured;
+    };
+    let directory: &Path =
+        path.parent().filter(|parent: &&Path| !parent.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    match check_writable(directory) {
+        Ok(()) => StateFileMode::ReadWrite { path: path.to_path_buf(), volatile: is_volatile(directory) },
+        Err(error) => StateFileMode::ReadOnly {
+            path: path.to_path_buf(),
+            reason: format!("{}: {}", directory.display(), describe_io_error(&error)),
+        },
+    }
+}
+
+fn check_writable(directory: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(directory)?;
+    let probe: PathBuf = directory.join(format!(".remoteplayer-write-probe-{}", std::process::id()));
+    std::fs::write(&probe, b"probe")?;
+    std::fs::remove_file(&probe)
+}
+
+fn is_volatile(directory: &Path) -> bool {
+    let Ok(statistics): nix::Result<Statfs> = nix::sys::statfs::statfs(directory) else {
+        return false;
+    };
+    let kind: FsType = statistics.filesystem_type();
+    kind == TMPFS_MAGIC || kind == OVERLAYFS_SUPER_MAGIC
+}
+
+pub fn describe_io_error(error: &std::io::Error) -> String {
+    match error.kind() {
+        std::io::ErrorKind::ReadOnlyFilesystem => "the filesystem is mounted read-only".to_string(),
+        std::io::ErrorKind::PermissionDenied => "no permission to write".to_string(),
+        _ => error.to_string(),
+    }
+}
 
 /// Write to a temporary sibling, fsync, rename: a reader (or a power cut)
 /// sees either the old or the new file, never half of one.
@@ -82,6 +139,22 @@ mod tests {
         };
         write_state_file(&path, &state).expect("write");
         assert_eq!(read_state_file(&path), Some(state));
+    }
+
+    #[test]
+    fn writable_directory_is_read_write_and_unusable_one_is_read_only() {
+        let directory: tempfile::TempDir = tempfile::tempdir().expect("temp dir");
+        let path: PathBuf = directory.path().join("state").join("state.json");
+        assert!(matches!(probe_state_file(Some(&path)), StateFileMode::ReadWrite { .. }));
+        assert_eq!(std::fs::read_dir(directory.path().join("state")).expect("list").count(), 0);
+
+        // A regular file where the directory should be: the closest thing to an
+        // unwritable location that also works when the tests run as root.
+        let blocker: PathBuf = directory.path().join("blocker");
+        std::fs::write(&blocker, b"").expect("seed");
+        let mode: StateFileMode = probe_state_file(Some(&blocker.join("state.json")));
+        assert!(matches!(mode, StateFileMode::ReadOnly { .. }), "{mode:?}");
+        assert_eq!(probe_state_file(None), StateFileMode::NotConfigured);
     }
 
     #[test]

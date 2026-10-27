@@ -18,12 +18,15 @@ pub struct WatcherConfig {
     pub mpv_socket: PathBuf,
     #[serde(default = "default_request_timeout_seconds")]
     pub request_timeout_seconds: u64,
-    /// JSON file with the latest snapshot, refreshed every `state_file_interval_seconds`.
-    /// Absent: no file and no periodic polling at all.
+    /// Keeps the restore snapshot across watcher restarts and reboots; used only
+    /// if its directory is writable. Absent: the snapshot lives in memory only.
     pub state_file: Option<PathBuf>,
-    #[serde(default = "default_state_file_interval_seconds")]
-    pub state_file_interval_seconds: u64,
-    /// Unix socket that answers `get` with mpv's current state. Absent: no socket.
+    /// While playing, how often a position-only change is written to the state
+    /// file. 0: the position is written only together with other changes and
+    /// when the watcher stops.
+    #[serde(default = "default_position_save_seconds")]
+    pub position_save_seconds: u64,
+    /// Unix socket answering `get`, `last` and `status`. Absent: no socket.
     pub state_socket: Option<PathBuf>,
 }
 
@@ -41,17 +44,15 @@ impl WatcherConfig {
         if self.state_file.is_none() && self.state_socket.is_none() {
             return Err(ConfigError::Invalid("configure at least one of state-file and state-socket".to_string()));
         }
-        if self.state_file_interval_seconds == 0 || self.request_timeout_seconds == 0 {
-            return Err(ConfigError::Invalid(
-                "state-file-interval-seconds and request-timeout-seconds must be greater than zero".to_string(),
-            ));
+        if self.request_timeout_seconds == 0 {
+            return Err(ConfigError::Invalid("request-timeout-seconds must be greater than zero".to_string()));
         }
         Ok(())
     }
 }
 
-fn default_state_file_interval_seconds() -> u64 {
-    7
+fn default_position_save_seconds() -> u64 {
+    10
 }
 
 fn default_request_timeout_seconds() -> u64 {
@@ -63,7 +64,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn file_interval_defaults_to_seven_seconds() {
+    fn position_save_defaults_to_ten_seconds() {
         let config: WatcherConfig = toml::from_str(
             r#"
             mpv-socket = "/run/remoteplayer-mpv/mpv.sock"
@@ -72,7 +73,7 @@ mod tests {
         )
         .expect("parse");
         config.validate().expect("valid");
-        assert_eq!(config.state_file_interval_seconds, 7);
+        assert_eq!(config.position_save_seconds, 10);
         assert!(config.state_socket.is_none());
     }
 
@@ -99,7 +100,7 @@ mod tests {
         let result: Result<WatcherConfig, toml::de::Error> = toml::from_str(
             r#"
             mpv-socket = "/run/remoteplayer-mpv/mpv.sock"
-            interval-seconds = 7
+            state-file-interval-seconds = 7
             "#,
         );
         assert!(result.is_err());

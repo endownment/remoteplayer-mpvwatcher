@@ -1,15 +1,14 @@
 [Unit]
-Description=remoteplayer: records the mpv playback state
+Description=remoteplayer: follows the mpv playback state
 After=remoteplayer-mpv.service
 
 [Service]
 Type=notify
 # Same user as remoteplayer-mpv.service: its IPC socket is private to that user.
 User=coop
-# /var/lib/remoteplayer-mpvwatcher/state.json
-StateDirectory=remoteplayer-mpvwatcher
-StateDirectoryMode=0750
-# /run/remoteplayer-mpvwatcher/state.sock
+# No StateDirectory=: on a read-only root systemd could not create it and the
+# unit would fail. The state file lives on the writable partition instead.
+# /run/remoteplayer-mpvwatcher/state.sock (tmpfs, always writable)
 RuntimeDirectory=remoteplayer-mpvwatcher
 RuntimeDirectoryMode=0700
 UMask=0077
@@ -21,6 +20,9 @@ RestartSec=2
 WatchdogSec=60
 
 ProtectSystem=strict
+# The state file's directory. "-": start without it (read-only system); the
+# watcher then keeps the snapshot in memory only.
+ReadWritePaths=-/srv/remoteplayer/state/mpvwatcher
 ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes

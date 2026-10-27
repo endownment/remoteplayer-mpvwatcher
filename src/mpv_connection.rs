@@ -1,6 +1,8 @@
 //! A deliberately simple mpv IPC client: one request at a time, wait for its
-//! reply, done. The watcher only reads properties every few seconds, so it does
-//! not need the multiplexing client of remoteplayer-restservice.
+//! reply, done. It is used in two ways, each on its own connection:
+//! - answering `get`: requests only, events switched off (`connect`);
+//! - following mpv: subscribe with `observe_property`, then read events
+//!   (`connect_with_events`, `observe_property`, `next_event`).
 //!
 //! Protocol: one JSON object per line. Requests carry a `request_id`, replies
 //! echo it. See `man mpv`, section "JSON IPC".
@@ -37,6 +39,15 @@ impl MpvError {
     }
 }
 
+/// An event from mpv. For `property-change`, `property` is the property name
+/// and `data` its new value (`null` when it became unavailable).
+#[derive(Debug, Clone, PartialEq)]
+pub struct MpvEvent {
+    pub name: String,
+    pub property: Option<String>,
+    pub data: Value,
+}
+
 pub struct MpvConnection {
     lines: Lines<BufReader<OwnedReadHalf>>,
     writer: OwnedWriteHalf,
@@ -46,15 +57,52 @@ pub struct MpvConnection {
 
 impl MpvConnection {
     pub async fn connect(socket: &Path, timeout: Duration) -> Result<MpvConnection, MpvError> {
+        let mut connection: MpvConnection = MpvConnection::connect_with_events(socket, timeout).await?;
+        // Events are noise for request/response use; this only affects our own connection.
+        connection.command(&[json!("disable_event"), json!("all")]).await?;
+        Ok(connection)
+    }
+
+    pub async fn connect_with_events(socket: &Path, timeout: Duration) -> Result<MpvConnection, MpvError> {
         let stream: UnixStream = UnixStream::connect(socket)
             .await
             .map_err(|source: std::io::Error| MpvError::Connect { socket: socket.display().to_string(), source })?;
         let (read_half, writer): (OwnedReadHalf, OwnedWriteHalf) = stream.into_split();
-        let mut connection: MpvConnection =
-            MpvConnection { lines: BufReader::new(read_half).lines(), writer, next_request_id: 1, timeout };
-        // Events are noise for a poller; this only affects our own connection.
-        connection.command(&[json!("disable_event"), json!("all")]).await?;
-        Ok(connection)
+        Ok(MpvConnection { lines: BufReader::new(read_half).lines(), writer, next_request_id: 1, timeout })
+    }
+
+    /// Subscribes to changes of `property`. mpv answers with an immediate
+    /// `property-change` event carrying the current value, then one per change.
+    /// The reply is not awaited: waiting would skip that first event, and
+    /// `next_event` ignores the reply when it arrives.
+    pub async fn observe_property(&mut self, observer_id: u64, property: &str) -> Result<(), MpvError> {
+        let request_id: u64 = self.take_request_id();
+        let mut line: String =
+            json!({ "command": ["observe_property", observer_id, property], "request_id": request_id }).to_string();
+        line.push('\n');
+        self.writer.write_all(line.as_bytes()).await?;
+        Ok(())
+    }
+
+    /// Waits for the next event, skipping replies. No timeout: an idle mpv may
+    /// stay silent for hours. Cancel-safe — the only `.await` is `next_line`,
+    /// so dropping this future inside `select!` loses no event.
+    pub async fn next_event(&mut self) -> Result<MpvEvent, MpvError> {
+        loop {
+            let Some(line): Option<String> = self.lines.next_line().await? else {
+                return Err(MpvError::Closed);
+            };
+            let Ok(message): Result<Value, serde_json::Error> = serde_json::from_str(&line) else {
+                continue;
+            };
+            if let Some(name) = message.get("event").and_then(Value::as_str) {
+                return Ok(MpvEvent {
+                    name: name.to_string(),
+                    property: message.get("name").and_then(Value::as_str).map(str::to_string),
+                    data: message.get("data").cloned().unwrap_or(Value::Null),
+                });
+            }
+        }
     }
 
     /// `Ok(None)` when mpv reports the property as unavailable (e.g. `time-pos` while idle).
@@ -87,9 +135,14 @@ impl MpvConnection {
         }
     }
 
-    async fn request(&mut self, command: &[Value]) -> Result<Value, MpvError> {
+    fn take_request_id(&mut self) -> u64 {
         let request_id: u64 = self.next_request_id;
         self.next_request_id += 1;
+        request_id
+    }
+
+    async fn request(&mut self, command: &[Value]) -> Result<Value, MpvError> {
+        let request_id: u64 = self.take_request_id();
         let mut line: String = json!({ "command": command, "request_id": request_id }).to_string();
         line.push('\n');
         self.writer.write_all(line.as_bytes()).await?;
@@ -128,6 +181,7 @@ pub mod tests {
 
     /// Serves `get_property` from a fixed map, the way mpv answers it, and sends
     /// an unsolicited event before every reply to prove that events are skipped.
+    /// `observe_property` gets its reply plus the initial `property-change` event.
     /// `get_property` requests are counted, so tests can tell whether mpv was asked.
     pub async fn serve_fake_mpv(
         listener: UnixListener,
@@ -144,6 +198,20 @@ pub mod tests {
                     let request: Value = serde_json::from_str(&line).expect("json");
                     let request_id: u64 = request["request_id"].as_u64().expect("id");
                     let command: &str = request["command"][0].as_str().unwrap_or_default();
+                    if command == "observe_property" {
+                        let observer_id: u64 = request["command"][1].as_u64().unwrap_or(0);
+                        let name: &str = request["command"][2].as_str().unwrap_or_default();
+                        let reply: Value = json!({"request_id": request_id, "error": "success"});
+                        let mut event: Value = json!({"event": "property-change", "id": observer_id, "name": name});
+                        if let Some(value) = properties.get(name) {
+                            event["data"] = value.clone();
+                        }
+                        let output: String = format!("{reply}\n{event}\n");
+                        if write_half.write_all(output.as_bytes()).await.is_err() {
+                            return;
+                        }
+                        continue;
+                    }
                     let reply: Value = match command {
                         "get_property" => {
                             property_requests.fetch_add(1, Ordering::SeqCst);
@@ -191,5 +259,23 @@ pub mod tests {
         assert_eq!(volume, Some(42.0));
         let missing: Option<f64> = connection.get_property_optional("time-pos").await.expect("time-pos");
         assert_eq!(missing, None);
+    }
+
+    #[tokio::test]
+    async fn observing_yields_the_current_value_as_an_event() {
+        let directory: tempfile::TempDir = tempfile::tempdir().expect("temp dir");
+        let properties: HashMap<String, Value> = HashMap::from([("pause".to_string(), json!(true))]);
+        let socket: PathBuf = start_fake_mpv(directory.path(), properties);
+
+        let mut connection: MpvConnection =
+            MpvConnection::connect_with_events(&socket, Duration::from_secs(1)).await.expect("connect");
+        connection.observe_property(1, "pause").await.expect("observe");
+        connection.observe_property(2, "time-pos").await.expect("observe");
+        let pause: MpvEvent = connection.next_event().await.expect("pause event");
+        assert_eq!(pause.property.as_deref(), Some("pause"));
+        assert_eq!(pause.data, json!(true));
+        let position: MpvEvent = connection.next_event().await.expect("time-pos event");
+        assert_eq!(position.property.as_deref(), Some("time-pos"));
+        assert_eq!(position.data, Value::Null);
     }
 }
