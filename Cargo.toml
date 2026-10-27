@@ -16,6 +16,7 @@ thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt", "net", "io-util", "time", "signal", "sync"] }
 toml = "0.8"
 tracing = "0.1"
+tracing-journald = "0.3"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
@@ -23,3 +24,29 @@ tempfile = "3"
 
 [profile.release]
 strip = true
+
+# `cargo deb` (https://github.com/kornelski/cargo-deb) builds the Debian package
+# from this section; CI does it for amd64, arm64 and armhf (see BUILD.md).
+[package.metadata.deb]
+maintainer = "remoteplayer <remoteplayer@localhost>"
+copyright = "remoteplayer authors"
+section = "video"
+priority = "optional"
+depends = "libc6 (>= 2.36), adduser"
+recommends = "remoteplayer-restservice"
+suggests = "socat"
+extended-description = """\
+Follows the playback state of the remoteplayer mpv instance through mpv's \
+change events and keeps the snapshot needed to resume playback after mpv \
+crashed or the system rebooted. Serves it on a Unix socket (get, last, \
+status) and, when its directory is writable, keeps it in a state file. \
+Nothing is enabled on installation."""
+maintainer-scripts = "packaging/debian/"
+assets = [
+    ["target/release/remoteplayer-mpvwatcher", "usr/bin/", "755"],
+    ["config/mpvwatcher.toml", "etc/remoteplayer/mpvwatcher.toml", "644"],
+    ["deploy/systemd/remoteplayer-mpvwatcher.service", "usr/lib/systemd/system/", "644"],
+    ["config/dev.toml", "usr/share/doc/remoteplayer-mpvwatcher/examples/dev.toml", "644"],
+    ["README.md", "usr/share/doc/remoteplayer-mpvwatcher/", "644"],
+    ["docs/STATE-FORMAT.md", "usr/share/doc/remoteplayer-mpvwatcher/", "644"],
+]

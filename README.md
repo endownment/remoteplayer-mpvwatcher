@@ -85,34 +85,65 @@ at its mpv (`../remoteplayer-restservice/dev-data/run/mpv.sock`) and
 
 ## Installation on the Raspberry Pi
 
-Target: Raspberry Pi OS (Debian 13 "trixie"), user `coop`, mpv running as
-`remoteplayer-mpv.service` (from the remoteplayer-restservice repository),
-the writable partition mounted at `/srv/remoteplayer` (see "Read-only SD card"
-in the remoteplayer-restservice README). Build the binary first, see [BUILD.md](BUILD.md).
+Target: Raspberry Pi OS (Debian 12 "bookworm" or 13 "trixie"), 64-bit
+(`arm64`) or 32-bit (`armhf`), mpv running as `remoteplayer-mpv.service`
+(from the remoteplayer-restservice package), the writable partition mounted
+at `/srv/remoteplayer` (see "Read-only SD card" in the remoteplayer-restservice
+README).
+
+### From the Debian package (recommended)
+
+Tagged releases on GitHub carry `.deb` files for `arm64`, `armhf` and `amd64`
+(BUILD.md, "Debian packages").
 
 ```sh
-sudo install -m 0755 target/release/remoteplayer-mpvwatcher /usr/local/bin/
+sudo apt install ./remoteplayer-mpvwatcher_0.1.0-1_arm64.deb
+sudo systemctl enable --now remoteplayer-mpvwatcher.service
+```
+
+It installs `/usr/bin/remoteplayer-mpvwatcher`, `/etc/remoteplayer/mpvwatcher.toml`
+(kept on upgrades), `remoteplayer-mpvwatcher.service`, the system user
+`remoteplayer` (shared with remoteplayer-restservice: mpv's socket is private
+to it) and `/srv/remoteplayer/state/mpvwatcher`. Nothing is enabled on
+installation. An upgrade restarts the watcher if it runs — it saves its
+snapshot when stopping and loads it when starting.
+
+### By hand
+
+Build the binary first (BUILD.md), then:
+
+```sh
+sudo adduser --system --group --home /var/lib/remoteplayer remoteplayer   # if not there yet
+sudo install -m 0755 target/release/remoteplayer-mpvwatcher /usr/bin/
 sudo install -d /etc/remoteplayer
 sudo install -m 0644 config/mpvwatcher.toml /etc/remoteplayer/mpvwatcher.toml
-sudo install -d -o coop -g coop -m 0750 /srv/remoteplayer/state/mpvwatcher   # skip on a fully read-only system
+sudo install -d -o remoteplayer -g remoteplayer -m 0750 /srv/remoteplayer/state/mpvwatcher   # skip on a fully read-only system
 sudo install -m 0644 deploy/systemd/remoteplayer-mpvwatcher.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now remoteplayer-mpvwatcher.service
 ```
 
-The unit runs as the same user as mpv (the IPC socket is private to that
-user), keeps the socket in `/run/remoteplayer-mpvwatcher/`, may write only
+The unit runs as `remoteplayer`, keeps the socket in
+`/run/remoteplayer-mpvwatcher/`, may write only
 `/srv/remoteplayer/state/mpvwatcher/`, uses systemd's watchdog, and is
 sandboxed (read-only system, no devices, Unix sockets only). It has no
 `StateDirectory=`, which systemd could not create on a read-only root.
 
-Check it:
+### Checking and logs
 
 ```sh
 systemctl status remoteplayer-mpvwatcher
 echo status | socat - UNIX-CONNECT:/run/remoteplayer-mpvwatcher/state.sock
 journalctl -u remoteplayer-mpvwatcher -f
+journalctl -u remoteplayer-mpvwatcher -p warning -b      # only warnings and errors of this boot
 ```
+
+Under systemd the watcher logs through the native journal protocol (levels
+become priorities, fields such as `socket` become `F_SOCKET`). It writes one
+line when mpv's socket is not there yet, one when it is picked up ("following
+mpv"), one warning when it is lost and one when it is back — not one per
+reconnect attempt. A broken configuration ends it with exit status 78, which
+the unit does not restart (`RestartPreventExitStatus=78`).
 
 ## Configuration
 

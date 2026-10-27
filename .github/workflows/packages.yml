@@ -1,0 +1,130 @@
+# Checks the code, then builds Debian packages for the Raspberry Pi (arm64 for
+# 64-bit, armhf for 32-bit Raspberry Pi OS) and for x86-64 machines (amd64).
+#
+# - every push and pull request: the packages are attached to the run as artifacts;
+# - a tag vX.Y.Z (matching `version` in Cargo.toml): they are also published as a
+#   GitHub release.
+#
+# The packages are built inside Debian 12 "bookworm", so the binaries need glibc
+# 2.36 at most and run on Raspberry Pi OS bookworm and trixie alike.
+
+name: packages
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: packages-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUST_VERSION: "1.85.0"
+  CARGO_DEB_VERSION: "3.8.0"
+  # Keep in sync with `libc6 (>= ...)` in Cargo.toml [package.metadata.deb].
+  MAX_GLIBC: "2.36"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Tag matches the crate version
+        if: github.ref_type == 'tag'
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)"
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match version $version in Cargo.toml"
+            exit 1
+          fi
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked
+
+  package:
+    name: package (${{ matrix.arch }})
+    needs: check
+    runs-on: ubuntu-latest
+    container: debian:bookworm
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            target: x86_64-unknown-linux-gnu
+            cross-packages: ""
+          - arch: arm64
+            target: aarch64-unknown-linux-gnu
+            cross-packages: gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+          - arch: armhf
+            target: armv7-unknown-linux-gnueabihf
+            cross-packages: gcc-arm-linux-gnueabihf libc6-dev-armhf-cross
+    steps:
+      - name: Install build tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git build-essential dpkg-dev binutils ${{ matrix.cross-packages }}
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain "$RUST_VERSION" --target "${{ matrix.target }}"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Install cargo-deb
+        run: |
+          # Built with the current stable Rust: cargo-deb may need a newer
+          # compiler than the project's minimum.
+          rustup toolchain install stable --profile minimal
+          cargo +stable install cargo-deb --locked --version "$CARGO_DEB_VERSION"
+      - name: Build the package
+        # The release profile already strips the binary; the cross linkers are
+        # configured in .cargo/config.toml.
+        run: cargo deb --locked --no-strip --target "${{ matrix.target }}"
+      - name: Inspect the package
+        run: |
+          deb="$(ls target/debian/*_${{ matrix.arch }}.deb)"
+          dpkg-deb --info "$deb"
+          dpkg-deb --contents "$deb"
+          mkdir -p unpacked
+          dpkg-deb --extract "$deb" unpacked
+          required="$(readelf --dyn-syms --wide unpacked/usr/bin/* | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -V | tail -n 1)"
+          echo "the binary needs glibc $required (allowed: $MAX_GLIBC)"
+          dpkg --compare-versions "$required" le "$MAX_GLIBC"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb-${{ matrix.arch }}
+          path: target/debian/*_${{ matrix.arch }}.deb
+          if-no-files-found: error
+
+  release:
+    if: github.ref_type == 'tag'
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: deb-*
+          merge-multiple: true
+          path: dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.deb
+          generate_release_notes: true

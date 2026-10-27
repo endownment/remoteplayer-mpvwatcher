@@ -71,7 +71,7 @@ described in [README.md](README.md#installation-on-the-raspberry-pi).
 ```sh
 git pull
 cargo build --release --locked -j 2
-sudo install -m 0755 target/release/remoteplayer-mpvwatcher /usr/local/bin/
+sudo install -m 0755 target/release/remoteplayer-mpvwatcher /usr/bin/
 sudo systemctl restart remoteplayer-mpvwatcher
 ```
 
@@ -90,22 +90,59 @@ cargo fmt                                    # formatting (rustfmt.toml: 120 col
 
 ## Cross-compiling for the Pi (optional)
 
-Building on a PC and copying the binary over is much faster. Two common tools:
+Building on a PC and copying the binary over is much faster. On Debian or
+Ubuntu the plain GNU cross linkers are enough — the project links no C
+libraries — and `.cargo/config.toml` already names them:
 
-- [`cross`](https://github.com/cross-rs/cross) (uses Docker or Podman):
-
-  ```sh
-  cargo install cross
-  cross build --release --target aarch64-unknown-linux-gnu        # 64-bit Raspberry Pi OS
-  cross build --release --target armv7-unknown-linux-gnueabihf    # 32-bit Raspberry Pi OS
-  ```
-
-- [`cargo-zigbuild`](https://github.com/rust-cross/cargo-zigbuild) (uses Zig as the linker, no containers):
-
-  ```sh
-  cargo install cargo-zigbuild    # also needs `zig` installed
-  rustup target add aarch64-unknown-linux-gnu
-  cargo zigbuild --release --target aarch64-unknown-linux-gnu
-  ```
+```sh
+sudo apt install gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf
+rustup target add aarch64-unknown-linux-gnu armv7-unknown-linux-gnueabihf
+cargo build --release --locked --target aarch64-unknown-linux-gnu        # 64-bit Raspberry Pi OS
+cargo build --release --locked --target armv7-unknown-linux-gnueabihf    # 32-bit Raspberry Pi OS
+```
 
 The result is in `target/<target>/release/`; copy it to the Pi with `scp`.
+`armv7` binaries run on every Pi from the Pi 2 on (the 32-bit OS on a Pi 3
+or 4 included), not on a Pi 1 or Pi Zero (ARMv6).
+
+The binary needs the glibc of the machine it was built on, at least. Built on
+a newer distribution than the Pi runs, it fails to start with
+"GLIBC_2.xx not found" — the CI builds inside Debian 12 for that reason.
+
+## Debian packages
+
+`[package.metadata.deb]` in `Cargo.toml` describes the package for
+[cargo-deb](https://github.com/kornelski/cargo-deb): files, dependencies, and
+the maintainer scripts in `packaging/debian/` (create the `remoteplayer` user
+and directories, reload systemd, restart the running service on upgrade,
+disable it on removal).
+
+```sh
+cargo install cargo-deb --locked
+cargo deb --locked                                                       # for this machine
+cargo deb --locked --no-strip --target aarch64-unknown-linux-gnu         # arm64 package on a PC
+cargo deb --locked --no-strip --target armv7-unknown-linux-gnueabihf     # armhf package on a PC
+```
+
+The packages land in `target/debian/`. On the Pi itself `cargo deb` builds a
+package for the Pi's own architecture (with the memory precautions above).
+
+### GitHub Actions
+
+`.github/workflows/packages.yml` does all of this on every push:
+
+1. **check** — `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`,
+   with Rust 1.85 (the minimum the project supports);
+2. **package** — for `amd64`, `arm64` and `armhf`, inside a `debian:bookworm`
+   container: builds the `.deb`, lists its contents and fails if the binary
+   needs a newer glibc than 2.36 (the `libc6 (>= 2.36)` dependency);
+3. **release** — only for a tag `vX.Y.Z` that matches `version` in
+   `Cargo.toml`: publishes the three packages as a GitHub release.
+
+Packages of an ordinary push are attached to the workflow run (Actions →
+the run → Artifacts). To publish a release:
+
+```sh
+# bump `version` in Cargo.toml, commit, then
+git tag v0.1.1 && git push origin v0.1.1
+```

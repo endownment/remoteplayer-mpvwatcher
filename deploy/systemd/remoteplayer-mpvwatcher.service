@@ -1,20 +1,23 @@
 [Unit]
 Description=remoteplayer: follows the mpv playback state
+Documentation=https://github.com/endownment/remoteplayer-mpvwatcher
 After=remoteplayer-mpv.service
 
 [Service]
 Type=notify
 # Same user as remoteplayer-mpv.service: its IPC socket is private to that user.
-User=coop
+User=remoteplayer
 # No StateDirectory=: on a read-only root systemd could not create it and the
 # unit would fail. The state file lives on the writable partition instead.
 # /run/remoteplayer-mpvwatcher/state.sock (tmpfs, always writable)
 RuntimeDirectory=remoteplayer-mpvwatcher
 RuntimeDirectoryMode=0700
 UMask=0077
-ExecStart=/usr/local/bin/remoteplayer-mpvwatcher --config /etc/remoteplayer/mpvwatcher.toml
+ExecStart=/usr/bin/remoteplayer-mpvwatcher --config /etc/remoteplayer/mpvwatcher.toml
 Restart=always
 RestartSec=2
+# Exit status 78 (EX_CONFIG): the configuration is wrong, restarting would not help.
+RestartPreventExitStatus=78
 # The watcher pings systemd from its main loop (at half this period); if the
 # loop hangs, systemd restarts it.
 WatchdogSec=60

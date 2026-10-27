@@ -139,9 +139,13 @@ impl Tracker {
         Ok((connection, process))
     }
 
+    /// Logs the change only, not each reconnect attempt every second.
     fn report_disconnected(&self, error: &MpvError) {
+        let socket: String = self.config.mpv_socket.display().to_string();
         if self.shared.mpv_connected() {
-            tracing::warn!(%error, "lost mpv; keeping the last snapshot");
+            tracing::warn!(socket, %error, "lost mpv; keeping the last snapshot and waiting for it to come back");
+        } else if self.shared.status().mpv_error.is_none() {
+            tracing::info!(socket, %error, "mpv is not reachable yet, waiting for its socket");
         }
         self.shared.set_mpv_connected(Some(error.to_string()));
     }
