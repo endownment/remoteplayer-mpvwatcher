@@ -4,16 +4,18 @@
 # The IPC socket of remoteplayer-mpv.service.
 mpv-socket = "/run/remoteplayer-mpv/mpv.sock"
 
-# How often the playback state is recorded.
-interval-seconds = 7
-
 # How long to wait for each reply from mpv before reconnecting.
 request-timeout-seconds = 2
 
-[output]
-# Latest snapshot as JSON, replaced atomically; written only when it changes.
-# remoteplayer-restservice reads it (restore.watcher-state-file) to resume after a crash.
-file = "/var/lib/remoteplayer-mpvwatcher/state.json"
+# Latest snapshot as JSON, replaced atomically and written only when it changes.
+# remoteplayer-restservice reads this file (restore.watcher-state-file) to resume
+# playback after mpv crashed: comment the line out and there is no state file,
+# no periodic polling of mpv — and no automatic restore after a crash.
+state-file = "/var/lib/remoteplayer-mpvwatcher/state.json"
 
-# The watcher's own IPC: newline-delimited JSON for anyone who wants live updates.
-socket = "/run/remoteplayer-mpvwatcher/state.sock"
+# How often the state file is refreshed. Applies to the file only.
+state-file-interval-seconds = 7
+
+# The watcher's own IPC: answers the request line `get` with mpv's current state.
+# Sends nothing unasked. Comment the line out to disable the socket.
+state-socket = "/run/remoteplayer-mpvwatcher/state.sock"

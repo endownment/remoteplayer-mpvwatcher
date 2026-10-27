@@ -6,11 +6,10 @@
 # (../remoteplayer-restservice/dev-data/run/mpv.sock).
 # Then, from the repository root:
 #   cargo run -- --config config/dev.toml
+#   echo get | socat - UNIX-CONNECT:dev-data/state.sock
 
 mpv-socket = "dev-data/mpv.sock"
-interval-seconds = 7
 request-timeout-seconds = 2
-
-[output]
-file = "dev-data/state.json"
-socket = "dev-data/state.sock"
+state-file = "dev-data/state.json"
+state-file-interval-seconds = 7
+state-socket = "dev-data/state.sock"

@@ -1,6 +1,6 @@
 //! The recorded state. The JSON layout is a contract with
-//! remoteplayer-restservice, which reads it to restore playback; it is
-//! documented in docs/STATE-FORMAT.md. Change `FORMAT_VERSION` on any
+//! remoteplayer-restservice, which reads the state file to restore playback;
+//! it is documented in docs/STATE-FORMAT.md. Change `FORMAT_VERSION` on any
 //! incompatible change.
 
 use serde::{Deserialize, Serialize};
@@ -15,8 +15,20 @@ pub const FORMAT_VERSION: u32 = 1;
 pub struct SavedPlayerState {
     pub format_version: u32,
     pub captured_at_unix_ms: u64,
-    /// Grows by one with every published change; lets readers spot new data.
+    /// Grows by one with every change written to the state file; lets readers spot new data.
     pub sequence: u64,
+    pub mpv: MpvProcessInfo,
+    pub player: PlayerSnapshot,
+}
+
+/// The reply to `get` on the state socket: what mpv reports right now. It has
+/// no `sequence` and does not apply the "keep the previous snapshot" rule —
+/// that is what the state file is for.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct LiveState {
+    pub format_version: u32,
+    pub captured_at_unix_ms: u64,
     pub mpv: MpvProcessInfo,
     pub player: PlayerSnapshot,
 }

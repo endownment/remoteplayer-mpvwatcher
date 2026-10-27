@@ -2,11 +2,13 @@ mod config;
 mod mpv_connection;
 mod output;
 mod recorder;
+mod sampler;
 mod snapshot;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::Arc;
+use std::time::Duration;
 
 use clap::Parser;
 use tokio::signal::unix::{Signal, SignalKind, signal};
@@ -15,21 +17,22 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::filter::FromEnvError;
 
 use crate::config::WatcherConfig;
-use crate::mpv_connection::{MpvConnection, MpvError};
-use crate::output::{SocketPublisher, read_state_file, write_state_file};
+use crate::mpv_connection::MpvError;
+use crate::output::{SocketServer, read_state_file, write_state_file};
 use crate::recorder::{Decision, Recorder};
-use crate::snapshot::{Capture, SavedPlayerState, capture};
+use crate::sampler::{Sampler, TimedCapture};
+use crate::snapshot::SavedPlayerState;
 
 #[derive(Debug, Parser)]
-#[command(version, about = "Records the mpv playback state every few seconds")]
+#[command(version, about = "Records the mpv playback state and serves it on request")]
 struct CommandLine {
     /// Path to the TOML configuration file.
     #[arg(long, default_value = "/etc/remoteplayer/mpvwatcher.toml")]
     config: PathBuf,
 }
 
-// One thread is plenty for a poll every few seconds; it also keeps memory use
-// minimal next to mpv on a 1 GB Raspberry Pi.
+// One thread is plenty for this workload; it also keeps memory use minimal
+// next to mpv on a 1 GB Raspberry Pi.
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
     init_logging();
@@ -45,87 +48,66 @@ async fn main() -> ExitCode {
 
 async fn run(command_line: CommandLine) -> Result<(), Box<dyn std::error::Error>> {
     let config: WatcherConfig = WatcherConfig::load(&command_line.config)?;
-    let previous: Option<SavedPlayerState> = config.output.file.as_deref().and_then(read_state_file);
-    let initial_line: Option<String> =
-        previous.as_ref().and_then(|state: &SavedPlayerState| serde_json::to_string(state).ok());
-    let mut watcher: Watcher = Watcher {
-        recorder: Recorder::new(previous),
-        socket: match &config.output.socket {
-            Some(path) => Some(SocketPublisher::start(path, initial_line)?),
-            None => None,
-        },
-        connection: None,
-        was_connected: None,
-        config,
+    let sampler: Arc<Sampler> =
+        Arc::new(Sampler::new(config.mpv_socket.clone(), Duration::from_secs(config.request_timeout_seconds)));
+
+    // Ownership: `_socket_server` lives until the end of `run`; its Drop then
+    // removes the socket file. Named with a leading underscore because it is
+    // never used directly — a bare `_` would drop it immediately.
+    let _socket_server: Option<SocketServer> = match &config.state_socket {
+        Some(path) => {
+            tracing::info!(socket = %path.display(), "answering `get` requests");
+            Some(SocketServer::start(path, Arc::clone(&sampler))?)
+        }
+        None => None,
     };
 
-    let mut terminate: Signal = signal(SignalKind::terminate())?;
-    let mut ticks: Interval = tokio::time::interval(Duration::from_secs(watcher.config.interval_seconds));
-    // After a stall (e.g. the Pi was busy), continue at the normal pace instead
-    // of firing the missed ticks in a burst.
-    ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let interval: Duration = Duration::from_secs(config.state_file_interval_seconds);
+    let mut file_recorder: Option<FileRecorder> = config.state_file.clone().map(|path: PathBuf| {
+        tracing::info!(file = %path.display(), interval_seconds = interval.as_secs(), "recording the state file");
+        FileRecorder { recorder: Recorder::new(read_state_file(&path)), path, interval, sampler: Arc::clone(&sampler) }
+    });
+    let mut file_timer: Option<Interval> = file_recorder.as_ref().map(|_recorder: &FileRecorder| repeating(interval));
+    let mut watchdog_timer: Option<Interval> = systemd_watchdog_interval().map(repeating);
 
+    let mut terminate: Signal = signal(SignalKind::terminate())?;
     notify_systemd(sd_notify::NotifyState::Ready);
-    tracing::info!(interval_seconds = watcher.config.interval_seconds, "remoteplayer-mpvwatcher started");
     loop {
         tokio::select! {
-            _ = ticks.tick() => watcher.tick().await,
+            () = next_tick(&mut file_timer) => {
+                if let Some(recorder) = file_recorder.as_mut() {
+                    recorder.update().await;
+                }
+            }
+            () = next_tick(&mut watchdog_timer) => notify_systemd(sd_notify::NotifyState::Watchdog),
             _ = tokio::signal::ctrl_c() => break,
             _ = terminate.recv() => break,
         }
-        notify_systemd(sd_notify::NotifyState::Watchdog);
     }
     tracing::info!("stopped");
-    // Ownership: `watcher` is dropped here; SocketPublisher's Drop removes the socket file.
     Ok(())
 }
 
-struct Watcher {
-    config: WatcherConfig,
+/// Keeps the state file current, applying the rule that a restarted, still
+/// empty mpv must not overwrite the snapshot needed to restore playback.
+struct FileRecorder {
+    path: PathBuf,
+    interval: Duration,
     recorder: Recorder,
-    socket: Option<SocketPublisher>,
-    connection: Option<MpvConnection>,
-    was_connected: Option<bool>,
+    sampler: Arc<Sampler>,
 }
 
-impl Watcher {
-    async fn tick(&mut self) {
-        let captured: Result<Capture, MpvError> = self.capture_once().await;
-        match captured {
-            Ok(capture) => {
-                self.report_connection(true, None);
-                let decision: Decision = self.recorder.consider(capture, unix_ms_now());
-                self.apply(decision).await;
-            }
-            Err(error) => {
-                if error.breaks_connection() {
-                    self.connection = None;
-                }
-                self.report_connection(false, Some(&error));
-            }
-        }
-    }
-
-    async fn capture_once(&mut self) -> Result<Capture, MpvError> {
-        if self.connection.is_none() {
-            let timeout: Duration = Duration::from_secs(self.config.request_timeout_seconds);
-            self.connection = Some(MpvConnection::connect(&self.config.mpv_socket, timeout).await?);
-        }
-        // Borrowing: `as_mut()` turns `&mut Option<MpvConnection>` into
-        // `Option<&mut MpvConnection>` — a mutable borrow of the value inside,
-        // without moving it out of `self`.
-        match self.connection.as_mut() {
-            Some(connection) => capture(connection).await,
-            None => Err(MpvError::Closed),
-        }
-    }
-
-    async fn apply(&mut self, decision: Decision) {
-        match decision {
-            Decision::Publish(state) => {
-                tracing::debug!(sequence = state.sequence, "publishing new state");
-                self.publish(state).await;
-            }
+impl FileRecorder {
+    async fn update(&mut self) {
+        // A capture made for a socket client within the last interval is as good
+        // as a new one, so mpv is not asked twice.
+        let captured: Result<TimedCapture, MpvError> = self.sampler.capture_reusing(self.interval).await;
+        let Ok(timed): Result<TimedCapture, MpvError> = captured else {
+            // The sampler has already logged that mpv is unreachable; the file keeps the last snapshot.
+            return;
+        };
+        match self.recorder.consider(timed.capture, timed.captured_at_unix_ms) {
+            Decision::Publish(state) => self.write(state).await,
             Decision::HoldPrevious => {
                 tracing::debug!("mpv restarted and is still empty; keeping the previous snapshot");
             }
@@ -133,44 +115,49 @@ impl Watcher {
         }
     }
 
-    async fn publish(&mut self, state: SavedPlayerState) {
-        if let Some(socket) = &self.socket {
-            match serde_json::to_string(&state) {
-                Ok(line) => socket.publish(line),
-                Err(error) => tracing::warn!(%error, "cannot encode the state"),
-            }
-        }
-        if let Some(path) = self.config.output.file.clone() {
-            // fsync can take a while on an SD card; it must not stall the event
-            // loop that also serves the socket clients.
-            let written: Result<std::io::Result<()>, tokio::task::JoinError> =
-                tokio::task::spawn_blocking(move || write_state_file(&path, &state)).await;
-            match written {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => tracing::warn!(%error, "cannot write the state file"),
-                Err(error) => tracing::warn!(%error, "state file writer failed"),
-            }
-        }
-    }
-
-    /// Logs only transitions, so an absent mpv does not flood the journal every few seconds.
-    fn report_connection(&mut self, connected: bool, error: Option<&MpvError>) {
-        if self.was_connected == Some(connected) {
-            return;
-        }
-        self.was_connected = Some(connected);
-        match error {
-            None => tracing::info!(socket = %self.config.mpv_socket.display(), "connected to mpv"),
-            Some(error) => tracing::warn!(%error, "mpv is not reachable; keeping the last snapshot"),
+    async fn write(&self, state: SavedPlayerState) {
+        tracing::debug!(sequence = state.sequence, "writing the state file");
+        let path: PathBuf = self.path.clone();
+        // fsync can take a while on an SD card; it must not stall the single
+        // thread that also answers socket clients.
+        let written: Result<std::io::Result<()>, tokio::task::JoinError> =
+            tokio::task::spawn_blocking(move || write_state_file(&path, &state)).await;
+        match written {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::warn!(%error, "cannot write the state file"),
+            Err(error) => tracing::warn!(%error, "state file writer failed"),
         }
     }
 }
 
-fn unix_ms_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|elapsed: Duration| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
-        .unwrap_or(0)
+fn repeating(period: Duration) -> Interval {
+    let mut timer: Interval = tokio::time::interval(period);
+    // After a stall (e.g. the Pi was busy), continue at the normal pace instead
+    // of firing the missed ticks in a burst.
+    timer.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    timer
+}
+
+/// Completes on the next tick, or never when there is no timer, so a disabled
+/// timer simply never wins the `select!`.
+async fn next_tick(timer: &mut Option<Interval>) {
+    match timer {
+        Some(interval) => {
+            interval.tick().await;
+        }
+        None => std::future::pending::<()>().await,
+    }
+}
+
+/// With `WatchdogSec=` systemd sets `WATCHDOG_USEC`; pinging at half that
+/// period is the recommended margin. `None` outside systemd or without a watchdog.
+fn systemd_watchdog_interval() -> Option<Duration> {
+    let mut microseconds: u64 = 0;
+    if sd_notify::watchdog_enabled(false, &mut microseconds) && microseconds > 0 {
+        Some(Duration::from_micros(microseconds / 2))
+    } else {
+        None
+    }
 }
 
 fn init_logging() {
@@ -184,8 +171,8 @@ fn init_logging() {
     }
 }
 
-/// `Ready` lets `Type=notify` units proceed; `Watchdog` pings are only acted on
-/// when the unit sets `WatchdogSec=`. Outside systemd both do nothing.
+/// `Ready` lets `Type=notify` units proceed; `Watchdog` proves the event loop is
+/// alive. Outside systemd both do nothing.
 fn notify_systemd(state: sd_notify::NotifyState<'_>) {
     if let Err(error) = sd_notify::notify(false, &[state]) {
         tracing::debug!(%error, "cannot notify systemd");

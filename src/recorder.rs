@@ -1,11 +1,11 @@
-//! Decides which captures become the published state.
+//! Decides which captures are written to the state file.
 //!
 //! The important rule: when mpv was restarted (new pid) and came back empty,
 //! the previous snapshot is kept. Otherwise a crash, a reboot or a restart by
 //! systemd would immediately overwrite the very state that is needed to
 //! resume playback. Once the new mpv plays something (restored or new), its
-//! state is published normally — and an intentional stop in the same mpv
-//! process is published too.
+//! state is written normally — and an intentional stop in the same mpv
+//! process is written too. The socket's live `get` does not go through here.
 
 use crate::snapshot::{Capture, FORMAT_VERSION, SavedPlayerState};
 

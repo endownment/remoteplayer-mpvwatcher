@@ -1,9 +1,11 @@
 # State format, version 1
 
-The state file and every line on the state socket hold the same JSON object.
-The file is pretty-printed; on the socket each object is a single line.
 Keys are kebab-case. Readers must ignore unknown keys; any incompatible
 change increments `format-version`.
+
+- The **state file** holds the object below, pretty-printed.
+- The **state socket** answers `get` with the same object on one line, minus
+  `sequence` (see "Socket protocol").
 
 ```json
 {
@@ -37,8 +39,8 @@ change increments `format-version`.
 | Key | Type | mpv property | Notes |
 |---|---|---|---|
 | `format-version` | integer | — | `1` |
-| `captured-at-unix-ms` | integer | — | when this state was first observed |
-| `sequence` | integer | — | +1 for every published change; survives watcher restarts |
+| `captured-at-unix-ms` | integer | — | file: when this state was first observed; socket: when mpv was queried |
+| `sequence` | integer | — | file only: +1 for every written change; survives watcher restarts |
 | `mpv.pid` | integer or null | `pid` | the process the state belongs to |
 | `mpv.version` | string or null | `mpv-version` | |
 | `player.playlist[].filename` | string | `playlist` | absolute path or URL, as mpv reports it |
@@ -55,13 +57,33 @@ change increments `format-version`.
 | `player.audio-delay` | number | `audio-delay` | seconds |
 | `player.subtitle-delay` | number | `sub-delay` | seconds |
 
-## Semantics
+## Socket protocol
 
-- A new state is published only when the player part or the mpv pid changed.
+Request/response over a Unix stream socket, one line (terminated by `\n`)
+each way. The watcher never sends anything unasked. A client may keep the
+connection open and send any number of requests.
+
+| Request | Reply |
+|---|---|
+| `get` | mpv's state at this moment: the object above without `sequence` |
+| empty line | nothing |
+| anything else | `{"error": "unknown request `...`; supported: get"}` |
+
+When mpv cannot be reached, `get` is answered with
+`{"error": "cannot connect to /run/remoteplayer-mpv/mpv.sock: ..."}`. A reply
+is a state exactly when it has no `error` key.
+
+`get` reports mpv as it is, so right after a crash it shows the new, empty
+mpv. The snapshot needed for a restore is the one in the state file.
+
+## Semantics of the state file
+
+- A new state is written only when the player part or the mpv pid changed.
   `captured-at-unix-ms` is therefore the moment the state was **first seen**,
   not the time of the last poll.
 - If mpv's pid changed and the new mpv has an empty playlist, the previous
-  state stays published (see README, "The one rule that matters").
+  state stays in the file (see README, "The state file keeps what is needed
+  to resume").
 - mpv deselects the audio track itself when it cannot open the audio output.
   That is not a user choice, so in that situation `"auto"` is recorded.
 - An empty `playlist` from the same pid means playback was stopped on purpose.

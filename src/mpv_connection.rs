@@ -122,13 +122,21 @@ pub mod tests {
     use super::*;
     use std::collections::HashMap;
     use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::net::UnixListener;
 
     /// Serves `get_property` from a fixed map, the way mpv answers it, and sends
     /// an unsolicited event before every reply to prove that events are skipped.
-    pub async fn serve_fake_mpv(listener: UnixListener, properties: HashMap<String, Value>) {
+    /// `get_property` requests are counted, so tests can tell whether mpv was asked.
+    pub async fn serve_fake_mpv(
+        listener: UnixListener,
+        properties: HashMap<String, Value>,
+        property_requests: Arc<AtomicUsize>,
+    ) {
         while let Ok((stream, _address)) = listener.accept().await {
             let properties: HashMap<String, Value> = properties.clone();
+            let property_requests: Arc<AtomicUsize> = Arc::clone(&property_requests);
             tokio::spawn(async move {
                 let (read_half, mut write_half): (OwnedReadHalf, OwnedWriteHalf) = stream.into_split();
                 let mut lines: Lines<BufReader<OwnedReadHalf>> = BufReader::new(read_half).lines();
@@ -138,6 +146,7 @@ pub mod tests {
                     let command: &str = request["command"][0].as_str().unwrap_or_default();
                     let reply: Value = match command {
                         "get_property" => {
+                            property_requests.fetch_add(1, Ordering::SeqCst);
                             let name: &str = request["command"][1].as_str().unwrap_or_default();
                             match properties.get(name) {
                                 Some(value) => json!({"request_id": request_id, "error": "success", "data": value}),
@@ -156,10 +165,18 @@ pub mod tests {
     }
 
     pub fn start_fake_mpv(directory: &Path, properties: HashMap<String, Value>) -> PathBuf {
+        start_counting_fake_mpv(directory, properties).0
+    }
+
+    pub fn start_counting_fake_mpv(
+        directory: &Path,
+        properties: HashMap<String, Value>,
+    ) -> (PathBuf, Arc<AtomicUsize>) {
         let socket: PathBuf = directory.join("mpv.sock");
         let listener: UnixListener = UnixListener::bind(&socket).expect("bind");
-        tokio::spawn(serve_fake_mpv(listener, properties));
-        socket
+        let property_requests: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
+        tokio::spawn(serve_fake_mpv(listener, properties, Arc::clone(&property_requests)));
+        (socket, property_requests)
     }
 
     #[tokio::test]
