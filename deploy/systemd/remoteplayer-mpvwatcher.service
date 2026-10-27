@@ -1,0 +1,46 @@
+[Unit]
+Description=remoteplayer: follows the mpv playback state
+Documentation=https://github.com/endownment/remoteplayer-mpvwatcher
+After=remoteplayer-mpv.service
+# The Pi runs unattended: keep restarting after failures, however many.
+StartLimitIntervalSec=0
+
+[Service]
+Type=notify
+# mpv's IPC socket is open to the group remoteplayer. To run as someone else,
+# change only User= in a drop-in (README, "Running as another user").
+User=remoteplayer
+Group=remoteplayer
+# No StateDirectory=: on a read-only root systemd could not create it and the
+# unit would fail. The state file lives on the writable partition instead.
+# /run/remoteplayer-mpvwatcher/state.sock (tmpfs, always writable), open to
+# the group remoteplayer like mpv's socket.
+RuntimeDirectory=remoteplayer-mpvwatcher
+RuntimeDirectoryMode=0750
+UMask=0007
+ExecStart=/usr/bin/remoteplayer-mpvwatcher --config /etc/remoteplayer/mpvwatcher.toml
+Restart=always
+RestartSec=2
+# Exit status 78 (EX_CONFIG): the configuration is wrong, restarting would not help.
+RestartPreventExitStatus=78
+# The watcher pings systemd from its main loop (at half this period); if the
+# loop hangs, systemd restarts it.
+WatchdogSec=60
+
+ProtectSystem=strict
+# The state file's directory. "-": start without it (read-only system); the
+# watcher then keeps the snapshot in memory only.
+ReadWritePaths=-/srv/remoteplayer/state/mpvwatcher
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+NoNewPrivileges=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

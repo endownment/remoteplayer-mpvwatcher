@@ -1,0 +1,8 @@
+# Linkers for cross-compiling to the Raspberry Pi from an x86-64 machine
+# (Debian/Ubuntu packages gcc-aarch64-linux-gnu and gcc-arm-linux-gnueabihf).
+# Only used with `--target`; native builds, also on the Pi, are unaffected.
+[target.aarch64-unknown-linux-gnu]
+linker = "aarch64-linux-gnu-gcc"
+
+[target.armv7-unknown-linux-gnueabihf]
+linker = "arm-linux-gnueabihf-gcc"

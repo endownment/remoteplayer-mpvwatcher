@@ -1,0 +1,39 @@
+#!/bin/sh
+# Runs after the files are unpacked (install and upgrade).
+set -e
+
+if [ "$1" = "configure" ]; then
+    # Shared with remoteplayer-restservice: mpv's IPC socket and the watcher's
+    # socket are open to this user's group only.
+    if ! getent passwd remoteplayer >/dev/null; then
+        adduser --system --group --home /var/lib/remoteplayer --no-create-home \
+            --gecos "remoteplayer services" remoteplayer
+    fi
+    install -d -o remoteplayer -g remoteplayer -m 0750 /var/lib/remoteplayer
+
+    # The state file's directory on the writable part of the system (README of
+    # remoteplayer-restservice, "Read-only SD card"). If a partition is mounted
+    # at /srv/remoteplayer later, create it on that partition as well. 2770:
+    # writable for the group, and the setgid bit keeps new files in it.
+    install -d -m 0755 /srv/remoteplayer /srv/remoteplayer/state 2>/dev/null || true
+    install -d -o remoteplayer -g remoteplayer -m 2770 /srv/remoteplayer/state/mpvwatcher 2>/dev/null || true
+
+    if [ -d /run/systemd/system ]; then
+        systemctl daemon-reload
+        # On upgrade restart the watcher if it runs: it saves its snapshot when
+        # stopping and loads it again when starting.
+        systemctl try-restart remoteplayer-mpvwatcher.service || true
+    fi
+
+    if ! systemctl is-enabled --quiet remoteplayer-mpvwatcher.service 2>/dev/null; then
+        cat <<'MESSAGE'
+
+remoteplayer-mpvwatcher is installed but not enabled. Start it with:
+  sudo systemctl enable --now remoteplayer-mpvwatcher.service
+  echo status | socat - UNIX-CONNECT:/run/remoteplayer-mpvwatcher/state.sock
+
+MESSAGE
+    fi
+fi
+
+exit 0

@@ -1,0 +1,10 @@
+#!/bin/sh
+# Runs after the files are removed. The user and the state file are kept,
+# also on purge.
+set -e
+
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload >/dev/null 2>&1 || true
+fi
+
+exit 0

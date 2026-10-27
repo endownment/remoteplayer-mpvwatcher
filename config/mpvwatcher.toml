@@ -1,0 +1,25 @@
+# remoteplayer-mpvwatcher configuration for the Raspberry Pi.
+# Installed as /etc/remoteplayer/mpvwatcher.toml (see README.md, "Installation").
+
+# The IPC socket of remoteplayer-mpv.service.
+mpv-socket = "/run/remoteplayer-mpv/mpv.sock"
+
+# How long to wait for each reply from mpv before reconnecting.
+request-timeout-seconds = 2
+
+# Keeps the restore snapshot across restarts of the watcher and reboots of the Pi.
+# Used only if its directory is writable (the writable partition, see README.md,
+# "Read-only SD card"); otherwise — or with the line commented out — the snapshot
+# lives in memory only, and a file found there is ignored.
+state-file = "/srv/remoteplayer/state/mpvwatcher/state.json"
+
+# While playing, how often the position alone is saved to the state file; after
+# a power cut playback resumes at most this many seconds early. Everything else
+# (file, playlist, pause, volume, tracks, seeks) is saved at once.
+# 0: save the position only together with other changes and on shutdown.
+position-save-seconds = 10
+
+# The watcher's own IPC: answers `get` (live state), `last` (the snapshot to
+# restore from) and `status`. Sends nothing unasked. remoteplayer-restservice
+# uses `last` (restore.watcher-socket).
+state-socket = "/run/remoteplayer-mpvwatcher/state.sock"
