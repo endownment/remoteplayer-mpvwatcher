@@ -3,7 +3,7 @@
 #
 # - every push and pull request: the packages are attached to the run as artifacts;
 # - a tag vX.Y.Z (matching `version` in Cargo.toml): they are also published as a
-#   GitHub release, from which endownment/remoteplayer-apt builds the APT repository.
+#   GitHub release, from which endownment/endownment-remoteplayer-apt builds the APT repository.
 #
 # The packages are built inside Debian 12 "bookworm", so the binaries need glibc
 # 2.36 at most and run on Raspberry Pi OS bookworm and trixie alike.
@@ -129,8 +129,9 @@ jobs:
           files: dist/*.deb
           generate_release_notes: true
       - name: Notify the APT repository
-        # endownment/remoteplayer-apt rebuilds itself from the releases; without
-        # the token it still picks this release up on its daily run.
+        # endownment/endownment-remoteplayer-apt rebuilds itself from the
+        # releases; without the token, or if it fails, the release still appears
+        # there on its daily run, so this step never fails the release.
         env:
           APT_REPOSITORY_TOKEN: ${{ secrets.APT_REPOSITORY_TOKEN }}
         run: |
@@ -141,5 +142,6 @@ jobs:
           curl -fsS -X POST \
             -H "Authorization: Bearer $APT_REPOSITORY_TOKEN" \
             -H "Accept: application/vnd.github+json" \
-            https://api.github.com/repos/endownment/remoteplayer-apt/dispatches \
-            -d "{\"event_type\":\"package-released\",\"client_payload\":{\"repository\":\"$GITHUB_REPOSITORY\",\"tag\":\"$GITHUB_REF_NAME\"}}"
+            https://api.github.com/repos/endownment/endownment-remoteplayer-apt/dispatches \
+            -d "{\"event_type\":\"package-released\",\"client_payload\":{\"repository\":\"$GITHUB_REPOSITORY\",\"tag\":\"$GITHUB_REF_NAME\"}}" \
+            || echo "::warning::could not notify the APT repository (expired token?); it will pick up $GITHUB_REF_NAME on its daily run"

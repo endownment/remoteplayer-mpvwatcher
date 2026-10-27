@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 description = "Follows the mpv playback state so it can be restored after a crash or a reboot"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/endownment/remoteplayer-mpvwatcher"
 publish = false
 
 [dependencies]
@@ -29,7 +31,10 @@ strip = true
 # from this section; CI does it for amd64, arm64 and armhf (see BUILD.md).
 [package.metadata.deb]
 maintainer = "remoteplayer <remoteplayer@localhost>"
-copyright = "remoteplayer authors"
+copyright = "2026 remoteplayer authors"
+# The full text in /usr/share/doc/<package>/copyright: AGPL-3.0 is not among
+# Debian's /usr/share/common-licenses.
+license-file = ["LICENSE", "0"]
 section = "video"
 priority = "optional"
 depends = "libc6 (>= 2.36), adduser"
